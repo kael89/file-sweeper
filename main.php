@@ -38,12 +38,7 @@ if ($errors) {
     printArr($errors);
     die;
 }
-foreach ($errors as $error) {
-    echo "$error\n";
-}
-if (!$errors) {
-    echo count($dupls) . " duplicate file(s) moved to $target\n";
-}
+echo count($dupls) . " duplicate file(s) moved to $target\n";
 
 /* Functions */
 // Parses arguments from the command line
