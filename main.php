@@ -2,7 +2,9 @@
 /* Program */
 
 global $config, $debug;
-$config = parse_ini_file('config.ini');
+
+// Get configuration parameters
+getConfig();
 
 // Parse arguments
 $args = parseArgs($argv);
@@ -21,24 +23,50 @@ if ($dir2 === false) {
 }
 $dupls = findDuplicates($dir1, $dir2);
 
-if ($debug) {
+if (!$moveFiles || $debug) {
     printArr($dupls, 'Duplicate files:');
 }
-if (!$moveFiles || $debug) {
+if (!$moveFiles) {
     exit();
 }
 
-// (Optional) move duplicate files
+// Move duplicate files
 $source = $args['target'] ?: $args['source'];
 $target = $args['target'] ?: $args['source'];
-$target .= '/' . ltrim($config['move_to_folder'], '/');
+$moveFolder = $target . '/' . ltrim($config['move_to_folder'], '/');
+$results = moveDuplicates($dupls, $source, $moveFolder);
 
-$errors = moveDuplicates($dupls, $source, $target);
-if ($errors) {
-    printArr($errors);
+if ($results['errors']) {
+    printArr($results['errors']);
     die;
 }
-echo count($dupls) . " duplicate file(s) moved to $target\n";
+
+$count = count($results['moves']);
+if ($debug) {
+    echo "\n";
+    printArr($results['moves'], "The following $count files will be moved:");
+    echo "\n";
+} else {
+    echo "$count duplicate file(s) moved to $moveFolder\n";
+}
+
+// Clear target folder deleting empty subfolders
+echo "Clearing up folders...\n";
+$results = clearFolder($target);
+
+if ($results['errors']) {
+    printArr($results['errors']);
+    die;
+}
+
+$count = count($results['deletes']);
+if ($debug) {
+    echo "\n";
+    printArr($results['deletes'], "The following $count items will be deleted:");
+    echo "\n";
+}
+
+echo "Done!\n";
 
 /* Functions */
 // Parses arguments from the command line
@@ -67,7 +95,7 @@ function parseArgs($argv)
         $dir = $argv[$off + 2];
         $target = realpath($dir);
 
-        if ($source === false) {
+        if ($target === false) {
             $results['errors'][] = "Error: Specified path $dir is not a directory";
         }
     } else {
@@ -88,6 +116,22 @@ function parseArgs($argv)
     return $results;
 }
 
+function getConfig()
+{
+    global $config;
+    $config = parse_ini_file('config.ini');
+
+    if (!isset($config['ignore'])) {
+        $config['ignore'] = [];
+    }
+    if (!isset($config['delete'])) {
+        $config['delete'] = [];
+    }
+    if (!isset($config['move_to_folder'])) {
+        $config['move_to_folder'] = '_duplicates';
+    }
+}
+
 // Checks if a file is included in the ignore list
 function isIgnored($file)
 {
@@ -95,13 +139,37 @@ function isIgnored($file)
 
     static $ignores;
     if (!isset($ignores)) {
-        $ignores = array_merge($config['ignore'], ['.', '..', $config['move_to_folder']]);
+        $ignores = array_merge($config['ignore'], $config['delete'], ['.', '..', $config['move_to_folder']]);
     }    
     return in_array($file, $ignores);
 }
 
-// Scans for all files and folders in the provided directory recursively
+// Check is a file or folder should be ignored when deleting
+function isDeleteIgnored($file)
+{
+    global $config;
+    return in_array($file, ['.', '..', $config['move_to_folder']]);
+}
+
+// Check if a file can be deleted when emptying folders
+function isDeletable($file)
+{
+    global $config;
+
+    static $deletables;
+    if (!isset($deletables)) {
+        $deletables = !empty($config['delete']) ? $config['delete'] : [];
+    }
+    return in_array($file, $deletables);
+}
+
 function scanDirectory($dir)
+{
+    return recursiveScan($dir);
+}
+
+// Scans for all files and folders in the provided directory recursively
+function recursiveScan($dir, $root = true)
 {
     global $config;
 
@@ -109,39 +177,45 @@ function scanDirectory($dir)
     static $files;
     static $folders;
 
-    if (!isset($id)) {
+    if ($root) {
         initScan($id, $files, $folders);
     }
-    $currentId = $id;
 
-    // Add current directory
     if (!is_dir($dir)) {
         return false;
-    } else {
-        $folders[$currentId] = $dir;
-        $id++;
     }
 
-    // Get directory contents
+    // Recurse in directory contents
     $items = scandir($dir);
+    $itemFiles = [];
     foreach ($items as $item) {
+        $path = "$dir/$item";
         if (isIgnored($item)) {
             continue;
+        } elseif (is_file($path)) {
+            $itemFiles[] = $item;
+            continue;
         }
 
-        $path = "$dir/$item";
+        recursiveScan($path, false);
+    }
 
-        if (is_dir($path)) {
-            scanDirectory($path);
-        } elseif (intval(filesize($path) / 1024) < $config['min_size']) {
+    // Get directory files
+    foreach ($itemFiles as $item) {
+        $path = "$dir/$item";
+        if (intval(filesize($path) / 1024) < $config['min_size']) {
             continue;
         } else {
-            $files[] = [$item, $currentId];
+            $files[] = [$item, $id];
         }
     }
 
+    // Add current directory
+    $folders[$id] = $dir;
+    $id++;
+
     // When scanning ends, reset static variables and return results
-    if ($currentId == 1) {
+    if ($root) {
         $results = [
             'files' => $files,
             'folders' => $folders
@@ -184,14 +258,16 @@ function findDuplicates($filedata1, $filedata2 = [])
     }
 
     // Sort files by name
-    usort($files, function($a, $b) {
-        return $a[0] > $b[0];
-    });
-    // Sort files by root folder
     usort($files, function($a, $b) use ($sourceId, $targetId) {
-        if ($a[0] == $b[0]) {
-            return ($b[2] == $sourceId && $a[2] == $targetId);
+        if ($a[0] > $b[0]) {
+            return 1;
         }
+
+        if ($a[0] == $b[0] && $b[2] == $sourceId && $a[2] == $targetId) {
+            return 1;
+        }
+
+        return -1;
     });
 
     $current = $files[0];
@@ -264,63 +340,89 @@ function moveDuplicates($files, $source, $target)
 {
     global $debug;
 
-    $oldFolders = [];
-    $moved = [];
-    $deleted = [];
-    $errors = [];
+    $results = [
+        'moves' => [],
+        'errors' => []
+    ];
 
     foreach ($files as $file) {
         $length = strlen($source);
         if (!substr($file, 0, $length) == $source) {
-            $errors[] = "Fatal error: wrong source folder specified when moving duplicates";
-            return $errors;
+            $results['errors'][] = "Fatal error: wrong source folder specified when moving duplicates";
+            return $results;
         }
 
         $newName = $target . substr($file, $length);
         $oldFolder = dirname($file);
+        $parentFolder = dirname($oldFolder);
         $newFolder = dirname($newName);
 
-        if (!file_exists($newFolder) && !mkdir($newFolder, fileperms($file), true)) {
-            $errors[] = "Error: could not create $newFolder";
+        if (!$debug && !file_exists($newFolder) && !mkdir($newFolder, fileperms($file), true)) {
+            $results['errors'][] = "Error: could not create $newFolder";
             continue;
         }
 
-        if (!rename($file, $newName)) {
-            $errors[] = "Error: could not move $file";
+        if ($debug) {
+            echo "$file => $newName\n";
+        } elseif (!rename($file, $newName)) {
+            $results['errors'][] = "Error: could not move $file";
             continue;
         }
 
-        $oldFolders[] = $oldFolder;
+        $results['moves'][] = "$file => $newName";
     }
 
-    if (!$debug) {
-        deleteEmptyFolders(array_unique($oldFolders));
-    }
-    return $errors;
+    return $results;
 }
 
-// Deletes all folders that the program emptied
-function deleteEmptyFolders($folders)
+// Clears a given folder by deleting all empty subfolders
+function clearFolder($root)
 {
-    $errors = [];
-    foreach ($folders as $folder) {
-        $items = scandir($folder);
+    global $debug;
 
-        if ($items === false) {
-            $errors[] = "Fatal error: could not find $folder when deleting empty folders";
-            return $errors;
-        }
+    $results = [
+        'deletes' => [],
+        'errors' => []
+    ];
 
-        foreach ($items as $item) {
-            if (!isIgnored($item)) {
-                continue 2;
-            }
-        }
-
-        if (!rmdir($folder)) {
-            $errors[] = "Error: could not delete $folder";
-        }
+    // Recurse into subdirectories
+    $items = scandir($root);
+    if ($items === false) {
+        die("Fatal error: could not find $root when deleting empty folders");
     }
 
-    return $errors;
+    $deletes = [];
+    foreach ($items as $item) {
+        $path = "$root/$item";
+        if (isDeleteIgnored($item)) {
+            continue;
+        }
+
+        if (is_file($path)) {
+            if (isDeletable($item)) {
+                $deletes[] = $path;
+            }
+            continue;
+        }
+        
+        $arr = clearFolder($path);
+        $results['deletes'] = array_merge($results['deletes'], $arr['deletes']);
+        $results['errors'] = array_merge($results['errors'], $arr['errors']);
+    }
+
+    foreach ($deletes as $item) {
+        if (!unlink($item)) {
+            $results['errors'][] = "Error: could not delete file $item\n";
+            return $results;
+        }
+        $results['deletes'][] = "File $item will be deleted\n";
+    }
+
+    if (count(scandir($root)) == 2 &&  !rmdir($root)) {
+        $results['errors'][] = "Error: could not delete folder $root";
+        return $results;
+    }
+
+    $results['deletes'][] = "Folder $root will be deleted\n";
+    return $results;
 }
