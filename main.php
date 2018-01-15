@@ -23,10 +23,12 @@ if ($dir2 === false) {
 }
 $dupls = findDuplicates($dir1, $dir2);
 
-if (!$moveFiles || $debug) {
+if ($debug) {
     printArr($dupls, 'Duplicate files:');
+    echo "\n";
 }
 if (!$moveFiles) {
+    echo count($dupls) . " duplicate files found\n";
     exit();
 }
 
@@ -357,16 +359,18 @@ function moveDuplicates($files, $source, $target)
         $parentFolder = dirname($oldFolder);
         $newFolder = dirname($newName);
 
-        if (!$debug && !file_exists($newFolder) && !mkdir($newFolder, fileperms($file), true)) {
-            $results['errors'][] = "Error: could not create $newFolder";
-            continue;
-        }
+        if (!$debug) {
+            // Create parent directory
+            if (!file_exists($newFolder) && !mkdir($newFolder, fileperms($file), true)) {
+                $results['errors'][] = "Error: could not create $newFolder";
+                continue;
+            }
 
-        if ($debug) {
-            echo "$file => $newName\n";
-        } elseif (!rename($file, $newName)) {
-            $results['errors'][] = "Error: could not move $file";
-            continue;
+            // Move duplicate
+            if (!rename($file, $newName)) {
+                $results['errors'][] = "Error: could not move $file";
+                continue;
+            }
         }
 
         $results['moves'][] = "$file => $newName";
@@ -412,10 +416,10 @@ function clearFolder($root)
 
     foreach ($deletes as $item) {
         if (!unlink($item)) {
-            $results['errors'][] = "Error: could not delete file $item\n";
+            $results['errors'][] = "Error: could not delete file $item";
             return $results;
         }
-        $results['deletes'][] = "File $item will be deleted\n";
+        $results['deletes'][] = "[file] $item";
     }
 
     if (count(scandir($root)) == 2 &&  !rmdir($root)) {
@@ -423,6 +427,6 @@ function clearFolder($root)
         return $results;
     }
 
-    $results['deletes'][] = "Folder $root will be deleted\n";
+    $results['deletes'][] = "[folder] $root";
     return $results;
 }
